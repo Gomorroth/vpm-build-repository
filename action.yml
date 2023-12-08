@@ -1,0 +1,16 @@
+name: "Build VPM Repository"
+desctiption: "Creating package list json file for VPM(VRChat Package Manager)"
+inputs:
+  input: 
+    description: "Filename of source json"
+    default: "source.json"
+  output: 
+    default: "vpm.json"
+  repo-token:
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    INPUT: ${{ inputs.input }}
+    OUTPUT: ${{ inputs.output }}
+    REPO-TOKEN: ${{ inputs.repo-token }}
