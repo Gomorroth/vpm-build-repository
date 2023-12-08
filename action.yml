@@ -1,5 +1,5 @@
 name: "vpm-build-repository"
-desctiption: "Creating package list json file for VPM(VRChat Package Manager)"
+description: "Creating package list json file for VPM(VRChat Package Manager)"
 author: "Gomorroth"
 inputs:
   input: 
