@@ -19,4 +19,4 @@ WORKDIR /app
 
 COPY --from=builder --chmod=+x /app/out/vpm-build-repository .
 
-CMD "./vpm-build-repository"
+ENTRYPOINT [ "./vpm-build-repository" ]
