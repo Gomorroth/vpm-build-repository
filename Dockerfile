@@ -14,7 +14,7 @@ COPY /src/* ./
 
 RUN dotnet publish -r linux-x64 -c Release --ucr --sc -o out
 
-FROM gcr.io/distroless/base-debian12:debug
+FROM alpine:latest
 WORKDIR /app
 
 COPY --from=builder --chmod=+x /app/out/vpm-build-repository .
