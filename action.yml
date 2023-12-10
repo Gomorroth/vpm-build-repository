@@ -21,3 +21,7 @@ runs:
     INPUT: ${{ inputs.input }}
     OUTPUT: ${{ inputs.output }}
     REPO-TOKEN: ${{ inputs.repo-token }}
+
+branding:
+  icon: 'file-text'
+  color: 'gray-dark'
