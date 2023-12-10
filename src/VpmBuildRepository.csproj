@@ -16,6 +16,14 @@
 	  	<StaticExecutable>true</StaticExecutable>
 		<StaticICULinking>true</StaticICULinking>
   		<StaticOpenSslLinking>true</StaticOpenSslLinking>
+		<StripSymbols>true</StripSymbols>
+		<LinkStandardCPlusPlusLibrary>true</LinkStandardCPlusPlusLibrary>
+		<TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
+		<DebuggerSupport>false</DebuggerSupport>
+		<EventSourceSupport>false</EventSourceSupport>
+		<MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+		<StackTraceSupport>false</StackTraceSupport>
+		<UseSystemResourceKeys>true</UseSystemResourceKeys>
 	</PropertyGroup>
 
 	<ItemGroup>
