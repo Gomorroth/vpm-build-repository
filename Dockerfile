@@ -17,6 +17,6 @@ RUN dotnet publish -r linux-x64 -c Release --ucr --sc -o out
 FROM gcr.io/distroless/base-debian12:nonroot
 WORKDIR /app
 
-COPY --from=builder --chmod=+x /app/out/vpm-build-repository .
+COPY --from=builder --chown=nonroot:nonroot --chmod=+x /app/out/vpm-build-repository .
 
 ENTRYPOINT [ "/app/vpm-build-repository" ]
