@@ -16,7 +16,7 @@ inputs:
     default: ${{ github.token }}
 runs:
   using: "docker"
-  image: "Dockerfile"
+  image: "Dockerfile.Action"
   env:
     INPUT: ${{ inputs.input }}
     OUTPUT: ${{ inputs.output }}
