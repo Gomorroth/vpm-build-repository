@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 var input = Environment.GetEnvironmentVariable("INPUT_INPUT") ?? "source.json";
 var output = Environment.GetEnvironmentVariable("INPUT_OUTPUT") ?? "index.json";
 var repoToken = Environment.GetEnvironmentVariable("INPUT_REPO-TOKEN");
+var formatOutput = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INPUT_FORMAT_OUTPUT"));
 Stopwatch sw = new();
 
 Source source;
@@ -26,63 +27,63 @@ if (repoToken is not null)
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", repoToken);
 }
 
-ConcurrentBag<Release> releaseList = [];
-ConcurrentDictionary<string, ConcurrentBag<(PackageInfo packageInfo, string zipUrl)>> dict = new();
+ConcurrentBag<(PackageInfo packageInfo, string zipUrl)> packageList = new();
 
-using (new Scope($"Fetch repositories", sw))
+using (new Scope($"Fetch packages", sw))
 {
-    await Parallel.ForEachAsync(source.Repositories?.Where(x => x.Contains("MA")) ?? [], async (repo, token) =>
+    await Parallel.ForEachAsync(source.Repositories ?? [], async (repo, token) =>
     {
         var releases = await client.GetFromJsonAsync($"https://api.github.com/repos/{repo}/releases", SerializeContexts.Default.ReleaseArray);
-        foreach (var x in releases ?? [])
+        await Parallel.ForEachAsync(releases ?? [], async (release, _) =>
         {
-            releaseList.Add(x);
-        }
-    });
-}
-
-using (new Scope($"Fetch releases", sw))
-{
-    await Parallel.ForEachAsync(releaseList, async (release, token) =>
-    {
-        PackageInfo? packageInfo = null;
-        string? zipUrl = null;
-        foreach (var asset in release?.Assets ?? [])
-        {
-            if (asset.Name is "package.json")
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("gomorroth.vpm-build-repository", null));
+            if (repoToken is not null)
             {
-                packageInfo = await client.GetFromJsonAsync($"{asset.DownloadUrl}", SerializeContexts.Default.PackageInfo, token);
-            }
-            else if (asset.ContentType is "application/zip")
-            {
-                zipUrl = asset.DownloadUrl;
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", repoToken);
             }
 
+            PackageInfo? packageInfo = null;
+            string? zipUrl = null;
+            foreach (var asset in release?.Assets ?? [])
+            {
+                if (asset.Name is "package.json")
+                {
+                    packageInfo = await client.GetFromJsonAsync($"{asset.DownloadUrl}", SerializeContexts.Default.PackageInfo, token);
+                }
+                else if (asset.ContentType is "application/zip")
+                {
+                    zipUrl = asset.DownloadUrl;
+                }
+
+                if (packageInfo is not null && zipUrl is not null)
+                {
+                    break;
+                }
+            }
             if (packageInfo is not null && zipUrl is not null)
             {
-                break;
+                packageList.Add((packageInfo, zipUrl));
             }
-        }
-        if (packageInfo is not null && zipUrl is not null)
-        {
-            dict.GetOrAdd(packageInfo.Name!, _ => new()).Add((packageInfo, zipUrl));
-        }
+        });
     });
 }
+
+var packages = packageList.ToArray();
 
 using (new Scope($"Export package list > {output}", sw))
 {
     var bufferWriter = new ArrayBufferWriter<byte>(ushort.MaxValue);
-    using Utf8JsonWriter writer = new(bufferWriter);
+    using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput });
     writer.WriteStartObject();
     {
-        foreach (var package in dict)
+        foreach (var package in packages.GroupBy(x => x.packageInfo.Name))
         {
-            writer.WritePropertyName(package.Key);
+            writer.WritePropertyName(package.Key!);
             writer.WriteStartObject();
             writer.WritePropertyName("versions"u8);
             writer.WriteStartObject();
-            foreach (var (packageInfo, zipUrl) in package.Value.OrderByDescending(x => x.packageInfo.Version!, SemVerComparer.Instance))
+            foreach (var (packageInfo, zipUrl) in package.OrderByDescending(x => x.packageInfo.Version!, SemVerComparer.Instance))
             {
                 writer.WriteStartObject(packageInfo.Version!);
                 writer.WriteString("name"u8, packageInfo.Name!);
