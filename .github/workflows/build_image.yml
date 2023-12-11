@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
-    paths: [ "Dockerfile_Image" ]
+    paths: [ "Dockerfile.Image" ]
 
 env:
   tag: ghcr.io/${GITHUB_REPOSITORY,,}
@@ -22,9 +22,9 @@ jobs:
           
       - name: Build Docker Image
         run: |
-          docker build --tag ${{ env.tag }}:latest\
+          docker build --tag ${{ env.tag }}:latest \
           --tag ${{ env.tag }}:$(echo $GITHUB_SHA | head -c7) \
-          -f Dockerfile_Image . 
+          -f Dockerfile.Image . 
           
       - name: Push Docker Image
         run: |
