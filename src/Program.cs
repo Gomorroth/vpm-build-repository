@@ -1,16 +1,21 @@
-﻿using System.Buffers;
+﻿using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 var input = Environment.GetEnvironmentVariable("INPUT_INPUT") ?? "source.json";
 var output = Environment.GetEnvironmentVariable("INPUT_OUTPUT") ?? "index.json";
 var repoToken = Environment.GetEnvironmentVariable("INPUT_REPO-TOKEN");
-var formatOutput = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INPUT_FORMAT_OUTPUT"));
+var formatOutput = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INPUT_FORMAT_OUTPUT")) || true;
 Stopwatch sw = new();
 
 Source source;
@@ -27,14 +32,14 @@ if (repoToken is not null)
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", repoToken);
 }
 
-ConcurrentBag<(PackageInfo packageInfo, string zipUrl)> packageList = new();
+ConcurrentBag<PackageInfo> packageList = new();
 
 using (new Scope($"Fetch packages", sw))
 {
-    await Parallel.ForEachAsync(source.Repositories ?? [], async (repo, token) =>
+    await Parallel.ForEachAsync(source.Repositories?.Where(x => x.Contains("Cloth")) ?? [], async (repo, token) =>
     {
         var releases = await client.GetFromJsonAsync($"https://api.github.com/repos/{repo}/releases", SerializeContexts.Default.ReleaseArray);
-        await Parallel.ForEachAsync(releases ?? [], async (release, _) =>
+        await Parallel.ForEachAsync(releases ?? [], async (release, token) =>
         {
             using var client = new HttpClient();
             client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("gomorroth.vpm-build-repository", null));
@@ -63,7 +68,26 @@ using (new Scope($"Fetch packages", sw))
             }
             if (packageInfo is not null && zipUrl is not null)
             {
-                packageList.Add((packageInfo, zipUrl));
+                packageInfo.Url = zipUrl;
+                packageList.Add(packageInfo);
+            }
+
+
+            async static Task<string> CalcHash(HttpClient client, string url)
+            {
+                using var stream = await client.GetStreamAsync(url);
+                int size = (int)stream.Length;
+                var data = ArrayPool<byte>.Shared.Rent(size);
+                stream.Read(data, 0, data.Length);
+
+                string HashAndToString(ReadOnlySpan<byte> data)
+                {
+                    var buffer = (stackalloc byte[64]);
+                    SHA256.TryHashData(data, buffer, out _);
+                    return Convert.ToHexString(buffer);
+                }
+
+                return HashAndToString(data.AsSpan(0, size));
             }
         });
     });
@@ -74,37 +98,21 @@ var packages = packageList.ToArray();
 using (new Scope($"Export package list > {output}", sw))
 {
     var bufferWriter = new ArrayBufferWriter<byte>(ushort.MaxValue);
-    using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput });
+    using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput,  });
+    var serializeOptions = new JsonSerializerOptions() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
     writer.WriteStartObject();
     {
-        foreach (var package in packages.GroupBy(x => x.packageInfo.Name))
+        foreach (var package in packages.GroupBy(x => x.Name))
         {
             writer.WritePropertyName(package.Key!);
             writer.WriteStartObject();
             writer.WritePropertyName("versions"u8);
             writer.WriteStartObject();
-            foreach (var (packageInfo, zipUrl) in package.OrderByDescending(x => x.packageInfo.Version!, SemVerComparer.Instance))
+            foreach (var packageInfo in package.OrderByDescending(x => x.Version!, SemVerComparer.Instance))
             {
-                writer.WriteStartObject(packageInfo.Version!);
-                writer.WriteString("name"u8, packageInfo.Name!);
-                writer.WriteString("displayName"u8, packageInfo.DisplayName!);
-                writer.WriteString("version"u8, packageInfo.Version!);
-                writer.WritePropertyName("author"u8);
-                AuthorConverter.Instance.Write(writer, source.Author!, null!);
-                writer.WriteString("url"u8, zipUrl);
-                writer.WriteStartObject("dependencies"u8);
-                foreach (var dependency in packageInfo.Dependencies ?? [])
-                {
-                    writer.WriteString(dependency.Key, dependency.Value);
-                }
-                writer.WriteEndObject();
-                writer.WriteStartObject("vpmDependencies"u8);
-                foreach (var dependency in packageInfo.VpmDependencies ?? [])
-                {
-                    writer.WriteString(dependency.Key, dependency.Value);
-                }
-                writer.WriteEndObject();
-                writer.WriteEndObject();
+                writer.WritePropertyName(packageInfo.Version!);
+                packageInfo.Author = source.Author;
+                JsonSerializer.Serialize(writer, packageInfo, SerializeContexts.Default.PackageInfo);
             }
             writer.WriteEndObject();
             writer.WriteEndObject();
@@ -112,6 +120,8 @@ using (new Scope($"Export package list > {output}", sw))
     }
     writer.WriteEndObject();
     await writer.FlushAsync();
+
+    Console.WriteLine(Encoding.UTF8.GetString(bufferWriter.WrittenSpan));
 
     await RandomAccess.WriteAsync(File.OpenHandle(output, FileMode.Create, FileAccess.Write, FileShare.None), bufferWriter.WrittenMemory, 0);
 }
@@ -243,8 +253,10 @@ internal sealed class Release
     {
         [JsonPropertyName("name")]
         public string? Name { get; set; }
+        
         [JsonPropertyName("content_type")]
         public string? ContentType { get; set; }
+
         [JsonPropertyName("browser_download_url")]
         public string? DownloadUrl { get; set; }
     }
@@ -254,18 +266,54 @@ internal record class PackageInfo
 {
     [JsonPropertyName("name")]
     public string? Name { get; set; }
-    [JsonPropertyName("version")]
-    public string? Version { get; set; }
+
     [JsonPropertyName("displayName")]
     public string? DisplayName { get; set; }
-    [JsonPropertyName("description")]
-    public string? Description { get; set; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; set; }
+
+    [JsonPropertyName("author")]
+    public Author? Author { get; set; }
+
     [JsonPropertyName("url")]
     public string? Url { get; set; }
+
+    [JsonPropertyName("description")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("unity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Unity { get; set; }
+
     [JsonPropertyName("dependencies")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? Dependencies { get; set; }
+
     [JsonPropertyName("vpmDependencies")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? VpmDependencies { get; set; }
+
+    [JsonPropertyName("legacyFolders")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? LegacyFolders { get; set; }
+
+    [JsonPropertyName("legacyFiles")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? LegacyFiles { get; set; }
+
+    [JsonPropertyName("legacyPackages")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? LegacyPackages { get; set; }
+
+    [JsonPropertyName("changelogUrl")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ChangelogUrl { get; set; }
+
+    [JsonPropertyName("zipSHA256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ZipSHA256 { get; set; }
 }
 
 internal sealed record RepositoryPackageInfo : PackageInfo
@@ -340,19 +388,10 @@ internal sealed class AuthorConverter : JsonConverter<Author>
     }
 }
 
-internal class PackageInfoZipUrl
-{
-    public required PackageInfo PackageInfo { get; set; }
-    public required string ZipUrl { get; set; }
-
-    public void Deconstruct(out PackageInfo p, out string z) => (p, z) = (PackageInfo, ZipUrl);
-}
-
 [JsonSerializable(typeof(Source))]
 [JsonSerializable(typeof(Release))]
 [JsonSerializable(typeof(Release[]))]
 [JsonSerializable(typeof(Release.Asset))]
 [JsonSerializable(typeof(PackageInfo))]
-[JsonSerializable(typeof(Dictionary<string, PackageInfoZipUrl[]>))]
 [JsonSerializable(typeof(RepositoryPackageInfo))]
 internal sealed partial class SerializeContexts : JsonSerializerContext;
