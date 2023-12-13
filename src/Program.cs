@@ -1,12 +1,13 @@
-﻿using System;
-using System.Buffers;
+﻿using System.Buffers;
 using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,8 +15,10 @@ using System.Text.Json.Serialization;
 
 var input = Environment.GetEnvironmentVariable("INPUT_INPUT") ?? "source.json";
 var output = Environment.GetEnvironmentVariable("INPUT_OUTPUT") ?? "index.json";
+var cache = Environment.GetEnvironmentVariable("INPUT_CACHE") ?? "cache.json";
 var repoToken = Environment.GetEnvironmentVariable("INPUT_REPO-TOKEN");
-var formatOutput = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INPUT_FORMAT_OUTPUT")) || true;
+var formatOutput = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INPUT_FORMAT_OUTPUT"));
+ConcurrentDictionary<string, string> fileHashCache;
 Stopwatch sw = new();
 
 Source source;
@@ -23,6 +26,19 @@ using (new Scope($"Read {input}", sw))
 {
     using var fs = File.OpenRead(input);
     source = await JsonSerializer.DeserializeAsync(fs, SerializeContexts.Default.Source) ?? throw new InvalidDataException();
+}
+
+using (new Scope($"Restore cache", sw))
+{
+    if (File.Exists(cache))
+    {
+        using var fs = File.OpenRead(cache);
+        fileHashCache = new ConcurrentDictionary<string, string>(JsonSerializer.Deserialize(fs, SerializeContexts.Default.DictionaryStringString) ?? []);
+    }
+    else
+    {
+        fileHashCache = [];
+    }
 }
 
 using var client = new HttpClient();
@@ -36,7 +52,7 @@ ConcurrentBag<PackageInfo> packageList = new();
 
 using (new Scope($"Fetch packages", sw))
 {
-    await Parallel.ForEachAsync(source.Repositories?.Where(x => x.Contains("Cloth")) ?? [], async (repo, token) =>
+    await Parallel.ForEachAsync(source.Repositories ?? [], async (repo, token) =>
     {
         var releases = await client.GetFromJsonAsync($"https://api.github.com/repos/{repo}/releases", SerializeContexts.Default.ReleaseArray);
         await Parallel.ForEachAsync(releases ?? [], async (release, token) =>
@@ -49,7 +65,7 @@ using (new Scope($"Fetch packages", sw))
             }
 
             PackageInfo? packageInfo = null;
-            string? zipUrl = null;
+            Asset? zip = null;
             foreach (var asset in release?.Assets ?? [])
             {
                 if (asset.Name is "package.json")
@@ -58,36 +74,39 @@ using (new Scope($"Fetch packages", sw))
                 }
                 else if (asset.ContentType is "application/zip")
                 {
-                    zipUrl = asset.DownloadUrl;
+                    zip = asset;
                 }
 
-                if (packageInfo is not null && zipUrl is not null)
+                if (packageInfo is not null && zip is not null)
                 {
                     break;
                 }
             }
-            if (packageInfo is not null && zipUrl is not null)
+            if (packageInfo is not null && zip is not null)
             {
-                packageInfo.Url = zipUrl;
+                packageInfo.Url = zip.DownloadUrl;
+                if (string.IsNullOrEmpty(packageInfo.ZipSHA256))
+                {
+                    if (!(fileHashCache?.TryGetValue(zip.DownloadUrl, out var hash) ?? false))
+                    {
+                        hash = await GetSHA256(client, zip);
+                        fileHashCache?.TryAdd(zip.DownloadUrl, hash);
+                    }
+                }
+                packageInfo.ZipSHA256 = hash;
                 packageList.Add(packageInfo);
             }
 
-
-            async static Task<string> CalcHash(HttpClient client, string url)
+            async static Task<string> GetSHA256(HttpClient client, Asset zip)
             {
-                using var stream = await client.GetStreamAsync(url);
-                int size = (int)stream.Length;
+                using var response = await client.GetAsync(zip.DownloadUrl);
+                var size = (int)(response.Content.Headers.ContentLength ?? 0);
                 var data = ArrayPool<byte>.Shared.Rent(size);
-                stream.Read(data, 0, data.Length);
-
-                string HashAndToString(ReadOnlySpan<byte> data)
-                {
-                    var buffer = (stackalloc byte[64]);
-                    SHA256.TryHashData(data, buffer, out _);
-                    return Convert.ToHexString(buffer);
-                }
-
-                return HashAndToString(data.AsSpan(0, size));
+                using var stream = await response.Content.ReadAsStreamAsync();
+                stream.Read(data, 0, size);
+                var result = ComputeSHA256(data.AsSpan(0, size));
+                ArrayPool<byte>.Shared.Return(data);
+                return result;
             }
         });
     });
@@ -95,11 +114,10 @@ using (new Scope($"Fetch packages", sw))
 
 var packages = packageList.ToArray();
 
+var bufferWriter = new ArrayBufferWriter<byte>(ushort.MaxValue);
 using (new Scope($"Export package list > {output}", sw))
 {
-    var bufferWriter = new ArrayBufferWriter<byte>(ushort.MaxValue);
     using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput,  });
-    var serializeOptions = new JsonSerializerOptions() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
     writer.WriteStartObject();
     {
         foreach (var package in packages.GroupBy(x => x.Name))
@@ -121,10 +139,118 @@ using (new Scope($"Export package list > {output}", sw))
     writer.WriteEndObject();
     await writer.FlushAsync();
 
-    Console.WriteLine(Encoding.UTF8.GetString(bufferWriter.WrittenSpan));
-
     await RandomAccess.WriteAsync(File.OpenHandle(output, FileMode.Create, FileAccess.Write, FileShare.None), bufferWriter.WrittenMemory, 0);
 }
+
+using (new Scope($"Export cache > {cache}", sw))
+{
+    bufferWriter.Clear();
+
+    using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput, });
+    writer.WriteStartObject();
+    {
+        foreach(var (url, hash) in fileHashCache.OrderBy(x => x.Key))
+        {
+            writer.WriteString(url, hash);
+        }
+    }
+    writer.WriteEndObject();
+    await writer.FlushAsync();
+
+    await RandomAccess.WriteAsync(File.OpenHandle(cache, FileMode.Create, FileAccess.Write, FileShare.None), bufferWriter.WrittenMemory, 0);
+}
+
+[SkipLocalsInit]
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+static string ComputeSHA256(ReadOnlySpan<byte> source)
+{
+    var hash = (stackalloc byte[32]);
+    var result = (stackalloc char[64]);
+
+    SHA256.TryHashData(source, hash, out _);
+
+    if (Avx2.IsSupported)
+    {
+        ToString_Vector256(hash, result);
+    }
+    else if (Ssse3.IsSupported)
+    {
+        ToString_Vector128(hash, result);
+    }
+    else
+    {
+        ToString(hash, result);
+    }
+
+    return result.ToString();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void ToString_Vector256(ReadOnlySpan<byte> source, Span<char> destination)
+    {
+        ref var srcRef = ref MemoryMarshal.GetReference(source);
+        ref var dstRef = ref Unsafe.As<char, ushort>(ref MemoryMarshal.GetReference(destination));
+        var hexMap = Vector256.Create("0123456789abcdef0123456789abcdef"u8);
+
+        for (int i = 0; i < 2; i++)
+        {
+            var src = Vector256.LoadUnsafe(ref srcRef);
+            var shiftedSrc = Vector256.ShiftRightLogical(src.AsUInt64(), 4).AsByte();
+            var lowNibbles = Avx2.UnpackLow(shiftedSrc, src);
+            var highNibbles = Avx2.UnpackHigh(shiftedSrc, src);
+
+            var l = Avx2.Shuffle(hexMap, lowNibbles & Vector256.Create((byte)0xF));
+            var h = Avx2.Shuffle(hexMap, highNibbles & Vector256.Create((byte)0xF));
+
+            var lh = l.WithUpper(h.GetLower());
+
+            var (v0, v1) = Vector256.Widen(lh);
+
+            v0.StoreUnsafe(ref dstRef);
+            v1.StoreUnsafe(ref Unsafe.AddByteOffset(ref dstRef, 32));
+
+            srcRef = ref Unsafe.AddByteOffset(ref srcRef, 16);
+            dstRef = ref Unsafe.AddByteOffset(ref dstRef, 64);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void ToString_Vector128(ReadOnlySpan<byte> source, Span<char> destination)
+    {
+        ref var srcRef = ref MemoryMarshal.GetReference(source);
+        ref var dstRef = ref Unsafe.As<char, ushort>(ref MemoryMarshal.GetReference(destination));
+        var hexMap = Vector128.Create("0123456789abcdef0123456789abcdef"u8);
+
+        for (int i = 0; i < 8; i++)
+        {
+            var src = Vector128.LoadUnsafe(ref srcRef);
+            var shiftedSrc = Vector128.ShiftRightLogical(src.AsUInt64(), 4).AsByte();
+            var lowNibbles = Sse2.UnpackLow(shiftedSrc, src);
+
+            var l = Ssse3.Shuffle(hexMap, lowNibbles & Vector128.Create((byte)0xF));
+
+            var (v0, _) = Vector128.Widen(l);
+
+            v0.StoreUnsafe(ref dstRef);
+
+            srcRef = ref Unsafe.AddByteOffset(ref srcRef, 4);
+            dstRef = ref Unsafe.AddByteOffset(ref dstRef, 16);
+        }
+    }
+
+    static void ToString(ReadOnlySpan<byte> source, Span<char> destination)
+    {
+        for (int i = 0, i2 = 0; i < source.Length && i2 < destination.Length; i++, i2 += 2)
+        {
+            var value = source[i];
+            uint difference = ((value & 0xF0U) << 4) + ((uint)value & 0x0FU) - 0x8989U;
+            uint packedResult = ((((uint)(-(int)difference) & 0x7070U) >> 4) + difference + 0xB9B9U) | (uint)0x2020;
+
+            destination[i2 + 1] = (char)(packedResult & 0xFF);
+            destination[i2] = (char)(packedResult >> 8);
+        }
+    }
+}
+
 
 internal readonly struct Scope : IDisposable
 {
@@ -225,17 +351,17 @@ internal sealed record class Author
 internal sealed record class Source
 {
     [JsonPropertyName("name")]
-    public string? Name { get; set; }
+    public required string Name { get; set; }
 
     [JsonPropertyName("id")]
-    public string? Id { get; set; }
+    public required string Id { get; set; }
 
     [JsonPropertyName("url")]
-    public string? Url { get; set; }
+    public required string Url { get; set; }
 
     [JsonPropertyName("author")]
     [JsonConverter(typeof(AuthorConverter))]
-    public Author? Author { get; set; }
+    public required Author Author { get; set; }
 
     [JsonPropertyName("githubRepos")]
     public string[]? Repositories { get; set; }
@@ -244,36 +370,40 @@ internal sealed record class Source
 internal sealed class Release
 {
     [JsonPropertyName("name")]
-    public string? Name { get; set; }
+    public required string Name { get; set; }
 
     [JsonPropertyName("assets")]
     public Asset[]? Assets { get; set; }
+}
 
-    public sealed class Asset
-    {
-        [JsonPropertyName("name")]
-        public string? Name { get; set; }
-        
-        [JsonPropertyName("content_type")]
-        public string? ContentType { get; set; }
+public sealed class Asset
+{
+    [JsonPropertyName("name")]
+    public required string Name { get; set; }
 
-        [JsonPropertyName("browser_download_url")]
-        public string? DownloadUrl { get; set; }
-    }
+    [JsonPropertyName("content_type")]
+    public required string ContentType { get; set; }
+
+    [JsonPropertyName("browser_download_url")]
+    public required string DownloadUrl { get; set; }
+
+    [JsonPropertyName("size")]
+    public ulong Size { get; set; }
 }
 
 internal record class PackageInfo
 {
     [JsonPropertyName("name")]
-    public string? Name { get; set; }
+    public required string Name { get; set; }
 
     [JsonPropertyName("displayName")]
-    public string? DisplayName { get; set; }
+    public required string DisplayName { get; set; }
 
     [JsonPropertyName("version")]
-    public string? Version { get; set; }
+    public required string Version { get; set; }
 
     [JsonPropertyName("author")]
+    [JsonConverter(typeof(AuthorConverter))]
     public Author? Author { get; set; }
 
     [JsonPropertyName("url")]
@@ -391,7 +521,7 @@ internal sealed class AuthorConverter : JsonConverter<Author>
 [JsonSerializable(typeof(Source))]
 [JsonSerializable(typeof(Release))]
 [JsonSerializable(typeof(Release[]))]
-[JsonSerializable(typeof(Release.Asset))]
+[JsonSerializable(typeof(Asset))]
 [JsonSerializable(typeof(PackageInfo))]
 [JsonSerializable(typeof(RepositoryPackageInfo))]
 internal sealed partial class SerializeContexts : JsonSerializerContext;
