@@ -92,8 +92,8 @@ using (new Scope($"Fetch packages", sw))
                         hash = await GetSHA256(client, zip);
                         fileHashCache?.TryAdd(zip.DownloadUrl, hash);
                     }
+                    packageInfo.ZipSHA256 = hash;
                 }
-                packageInfo.ZipSHA256 = hash;
                 packageList.Add(packageInfo);
             }
 
@@ -119,6 +119,16 @@ using (new Scope($"Export package list > {output}", sw))
 {
     using Utf8JsonWriter writer = new(bufferWriter, new() { Indented = formatOutput,  });
     writer.WriteStartObject();
+    writer.WriteString("name"u8, source.Name);
+    if (source.Author is not null)
+    {
+        writer.WritePropertyName("author"u8);
+        AuthorConverter.Instance.Write(writer, source.Author, SerializeContexts.Default.Options);
+    }
+    writer.WriteString("url"u8, source.Url);
+    writer.WriteString("id"u8, source.Id);
+    writer.WritePropertyName("packages"u8);
+    writer.WriteStartObject();
     {
         foreach (var package in packages.GroupBy(x => x.Name))
         {
@@ -136,6 +146,7 @@ using (new Scope($"Export package list > {output}", sw))
             writer.WriteEndObject();
         }
     }
+    writer.WriteEndObject();
     writer.WriteEndObject();
     await writer.FlushAsync();
 
