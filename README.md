@@ -3,7 +3,7 @@ VPMリポジトリ―を生成するアクション
 
 ## 使用方法
 ```yml
-- uses: gomorroth/vpm-build-repository@v1
+- uses: gomorroth/vpm-build-repository@v2.1
   with:
     source: "source.json"
     output: "vpm.json"

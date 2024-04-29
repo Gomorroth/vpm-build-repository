@@ -1,14 +1,10 @@
-FROM mcr.microsoft.com/dotnet/sdk:latest as builder
+FROM mcr.microsoft.com/dotnet/sdk:8.0 as builder
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         clang \
-        make \
-        cmake \
-        zlib1g-dev \
-        libicu-dev \
-        libssl-dev 
+        zlib1g-dev
 
 COPY /src/* ./
 

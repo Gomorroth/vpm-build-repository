@@ -13,10 +13,6 @@
 	<PropertyGroup>
 		<PublishAot>true</PublishAot>
 		<InvariantGlobalization>true</InvariantGlobalization>
-	  	<StaticExecutable>true</StaticExecutable>
-		<StaticICULinking>true</StaticICULinking>
-  		<StaticOpenSslLinking>true</StaticOpenSslLinking>
-		<LinkStandardCPlusPlusLibrary>true</LinkStandardCPlusPlusLibrary>
 		<StripSymbols>true</StripSymbols>
 		<TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
 		<DebuggerSupport>false</DebuggerSupport>
@@ -25,10 +21,5 @@
 		<StackTraceSupport>false</StackTraceSupport>
 		<UseSystemResourceKeys>true</UseSystemResourceKeys>
 	</PropertyGroup>
-
-	<ItemGroup>
-		<LinkerArgs Include="-lstdc++" />
-		<LinkerArgs Include="-gdwarf-4" />
-	</ItemGroup>
 
 </Project>

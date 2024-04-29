@@ -10,6 +10,10 @@ inputs:
     description: "Filename of output json"
     required: false
     default: "vpm.json"
+  output: 
+    description: "Filename of cache json to store calculated hashes"
+    required: false
+    default: "cache.json"
   repo-token:
     description: 'The GitHub token used to manage labels'
     required: false
@@ -20,6 +24,7 @@ runs:
   env:
     INPUT: ${{ inputs.input }}
     OUTPUT: ${{ inputs.output }}
+    CACHE: ${{ inputs.cache }}
     REPO-TOKEN: ${{ inputs.repo-token }}
 
 branding:
