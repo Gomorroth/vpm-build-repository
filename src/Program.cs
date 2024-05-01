@@ -122,8 +122,7 @@ using (new Scope($"Export package list > {output}", sw))
     writer.WriteString("name"u8, source.Name);
     if (source.Author is not null)
     {
-        writer.WritePropertyName("author"u8);
-        AuthorConverter.Instance.Write(writer, source.Author, SerializeContexts.Default.Options);
+        writer.WriteString("author"u8, source.Author.Name);
     }
     writer.WriteString("url"u8, source.Url);
     writer.WriteString("id"u8, source.Id);
